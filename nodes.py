@@ -6,6 +6,12 @@ import comfy.utils
 import latent_preview
 
 
+def _repeat_batch(tensor, batch_size):
+    """Repeat tensor along dim 0, handling any number of dimensions."""
+    repeats = [batch_size] + [1] * (tensor.ndim - 1)
+    return tensor.repeat(*repeats)
+
+
 def _generate_batch_noise(latent_image, seed, batch_size):
     """Generate noise with truly different seeds for each batch item.
 
@@ -97,7 +103,7 @@ class KSamplerBatch:
 
         # Replicate latent for batch
         if batch_size > 1:
-            batched_latent = latent.repeat(batch_size, 1, 1, 1)
+            batched_latent = _repeat_batch(latent, batch_size)
         else:
             batched_latent = latent
 
@@ -109,7 +115,7 @@ class KSamplerBatch:
         if "noise_mask" in latent_image:
             mask = latent_image["noise_mask"]
             if batch_size > 1 and mask.shape[0] < batch_size:
-                noise_mask = mask.repeat(batch_size, 1, 1, 1)[:batch_size]
+                noise_mask = _repeat_batch(mask, batch_size)
             else:
                 noise_mask = mask
 
@@ -209,7 +215,7 @@ class KSamplerBatchAdvanced:
 
         # Replicate latent for batch
         if batch_size > 1:
-            batched_latent = latent.repeat(batch_size, 1, 1, 1)
+            batched_latent = _repeat_batch(latent, batch_size)
         else:
             batched_latent = latent
 
@@ -232,7 +238,7 @@ class KSamplerBatchAdvanced:
         if "noise_mask" in latent_image:
             mask = latent_image["noise_mask"]
             if batch_size > 1 and mask.shape[0] < batch_size:
-                noise_mask = mask.repeat(batch_size, 1, 1, 1)[:batch_size]
+                noise_mask = _repeat_batch(mask, batch_size)
             else:
                 noise_mask = mask
 
