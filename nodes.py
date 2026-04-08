@@ -19,20 +19,34 @@ def _repeat_batch(tensor, batch_size):
     return tensor.repeat(*repeats)
 
 
-def _generate_batch_noise(latent_image, seed, batch_size):
-    """Generate noise with truly different seeds for each batch item.
+def _generate_batch_noise(latent_image, seed, batch_size, seed_mode="incremental"):
+    """Generate noise with different seeds for each batch item.
 
-    Each item i uses torch.manual_seed(seed + i) so every image is
-    independently reproducible.  Noise is generated in float32 (matching
-    ComfyUI's prepare_noise behaviour) so that seed N here produces the
-    exact same noise as the standard KSampler with seed N.
+    seed_mode:
+      - "incremental": seed+0, seed+1, seed+2, … (reproducible individually)
+      - "random": each item gets a random seed derived from the base seed
+      - "fixed": all items share the same seed (same image, useful for testing)
     """
     total_batch = latent_image.shape[0]
     shape = [1] + list(latent_image.shape[1:])
     target_dtype = latent_image.dtype
+
+    # Pre-compute seeds based on mode
+    if seed_mode == "random":
+        rng = torch.Generator(device="cpu")
+        rng.manual_seed(seed)
+        item_seeds = [int(torch.randint(0, 2**63, (1,), generator=rng).item()) for _ in range(batch_size)]
+        print(f"{HEADER} Seed mode: RANDOM (derived from base seed {seed})")
+    elif seed_mode == "fixed":
+        item_seeds = [seed] * batch_size
+        print(f"{HEADER} Seed mode: FIXED (all items use seed {seed})")
+    else:
+        item_seeds = [seed + i for i in range(batch_size)]
+        print(f"{HEADER} Seed mode: INCREMENTAL (seed, seed+1, seed+2, ...)")
+
     noises = []
     for i in range(total_batch):
-        item_seed = seed + (i % batch_size)
+        item_seed = item_seeds[i % batch_size]
         generator = torch.manual_seed(item_seed)
         noise = torch.randn(
             shape,
@@ -112,6 +126,14 @@ class KSamplerBatch:
                     "step": 1,
                     "tooltip": "Number of images to generate in parallel on the GPU",
                 }),
+                "seed_mode": (["incremental", "random", "fixed"], {
+                    "default": "incremental",
+                    "tooltip": (
+                        "incremental: seed+0, seed+1, seed+2… (each image reproducible individually). "
+                        "random: each item gets a unique random seed derived from the base seed. "
+                        "fixed: all items use the same seed (identical images, useful for testing)."
+                    ),
+                }),
             },
         }
 
@@ -125,13 +147,13 @@ class KSamplerBatch:
 
     def sample(
         self, model, seed, steps, cfg, sampler_name, scheduler,
-        positive, negative, latent_image, denoise, batch_size,
+        positive, negative, latent_image, denoise, batch_size, seed_mode,
     ):
         print(f"\n{'='*60}")
         print(f"{HEADER} KSampler Batch — START")
         print(f"{HEADER} Config: batch_size={batch_size}, seed={seed}, steps={steps}, cfg={cfg}")
         print(f"{HEADER} Sampler: {sampler_name}, Scheduler: {scheduler}, Denoise: {denoise}")
-        print(f"{HEADER} Seeds: {[seed + i for i in range(batch_size)]}")
+        print(f"{HEADER} Seed mode: {seed_mode}")
         _log_latent_info("Input latent", latent_image)
         _log_vram()
 
@@ -149,8 +171,8 @@ class KSamplerBatch:
             print(f"{HEADER} batch_size=1, no replication needed")
 
         # Generate noise with different seeds per item
-        print(f"{HEADER} Generating noise with independent seeds...")
-        noise = _generate_batch_noise(batched_latent, seed, batch_size)
+        print(f"{HEADER} Generating noise...")
+        noise = _generate_batch_noise(batched_latent, seed, batch_size, seed_mode)
 
         # Replicate noise_mask if present
         noise_mask = None
@@ -251,6 +273,14 @@ class KSamplerBatchAdvanced:
                     "step": 1,
                     "tooltip": "Number of images to generate in parallel on the GPU",
                 }),
+                "seed_mode": (["incremental", "random", "fixed"], {
+                    "default": "incremental",
+                    "tooltip": (
+                        "incremental: seed+0, seed+1, seed+2… (each image reproducible individually). "
+                        "random: each item gets a unique random seed derived from the base seed. "
+                        "fixed: all items use the same seed (identical images, useful for testing)."
+                    ),
+                }),
             },
         }
 
@@ -265,7 +295,7 @@ class KSamplerBatchAdvanced:
     def sample(
         self, model, add_noise, noise_seed, steps, cfg, sampler_name,
         scheduler, positive, negative, latent_image, start_at_step,
-        end_at_step, return_with_leftover_noise, batch_size,
+        end_at_step, return_with_leftover_noise, batch_size, seed_mode,
     ):
         print(f"\n{'='*60}")
         print(f"{HEADER} KSampler Batch Advanced — START")
@@ -273,7 +303,7 @@ class KSamplerBatchAdvanced:
         print(f"{HEADER} Sampler: {sampler_name}, Scheduler: {scheduler}")
         print(f"{HEADER} Steps range: {start_at_step} → {end_at_step}")
         print(f"{HEADER} add_noise={add_noise}, return_leftover_noise={return_with_leftover_noise}")
-        print(f"{HEADER} Seeds: {[noise_seed + i for i in range(batch_size)]}")
+        print(f"{HEADER} Seed mode: {seed_mode}")
         _log_latent_info("Input latent", latent_image)
         _log_vram()
 
@@ -303,8 +333,8 @@ class KSamplerBatchAdvanced:
             )
             print(f"{HEADER} Noise: DISABLED (zeros), shape={list(noise.shape)}")
         else:
-            print(f"{HEADER} Generating noise with independent seeds...")
-            noise = _generate_batch_noise(batched_latent, noise_seed, batch_size)
+            print(f"{HEADER} Generating noise...")
+            noise = _generate_batch_noise(batched_latent, noise_seed, batch_size, seed_mode)
 
         # Replicate noise_mask if present
         noise_mask = None
