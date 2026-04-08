@@ -1,9 +1,16 @@
+import time
+import logging
+
 import torch
 import comfy.sample
 import comfy.samplers
 import comfy.model_management
 import comfy.utils
 import latent_preview
+
+logger = logging.getLogger("KSamplerBatch")
+
+HEADER = "\033[95m[KSampler Batch]\033[0m"
 
 
 def _repeat_batch(tensor, batch_size):
@@ -20,14 +27,13 @@ def _generate_batch_noise(latent_image, seed, batch_size):
     ComfyUI's prepare_noise behaviour) so that seed N here produces the
     exact same noise as the standard KSampler with seed N.
     """
-    # Use the actual batch dim of the latent, not the user-requested
-    # batch_size, to handle already-batched inputs correctly.
     total_batch = latent_image.shape[0]
     shape = [1] + list(latent_image.shape[1:])
     target_dtype = latent_image.dtype
     noises = []
     for i in range(total_batch):
-        generator = torch.manual_seed(seed + (i % batch_size))
+        item_seed = seed + (i % batch_size)
+        generator = torch.manual_seed(item_seed)
         noise = torch.randn(
             shape,
             dtype=torch.float32,
@@ -36,7 +42,26 @@ def _generate_batch_noise(latent_image, seed, batch_size):
             device="cpu",
         )
         noises.append(noise)
-    return torch.cat(noises, dim=0).to(dtype=target_dtype)
+        print(f"{HEADER} Noise item {i}: seed={item_seed}, shape={list(noise.shape)}, dtype=float32→{target_dtype}")
+    result = torch.cat(noises, dim=0).to(dtype=target_dtype)
+    print(f"{HEADER} Final noise tensor: shape={list(result.shape)}, dtype={result.dtype}")
+    return result
+
+
+def _log_latent_info(label, latent_dict):
+    """Print useful info about a LATENT dict."""
+    samples = latent_dict["samples"]
+    keys = [k for k in latent_dict.keys() if k != "samples"]
+    print(f"{HEADER} {label}: shape={list(samples.shape)}, dtype={samples.dtype}, extra_keys={keys}")
+
+
+def _log_vram():
+    """Print current VRAM usage if CUDA is available."""
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / (1024 ** 3)
+        reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+        total = torch.cuda.get_device_properties(0).total_mem / (1024 ** 3)
+        print(f"{HEADER} VRAM: {allocated:.2f}GB allocated / {reserved:.2f}GB reserved / {total:.2f}GB total")
 
 
 class KSamplerBatch:
@@ -102,6 +127,14 @@ class KSamplerBatch:
         self, model, seed, steps, cfg, sampler_name, scheduler,
         positive, negative, latent_image, denoise, batch_size,
     ):
+        print(f"\n{'='*60}")
+        print(f"{HEADER} KSampler Batch — START")
+        print(f"{HEADER} Config: batch_size={batch_size}, seed={seed}, steps={steps}, cfg={cfg}")
+        print(f"{HEADER} Sampler: {sampler_name}, Scheduler: {scheduler}, Denoise: {denoise}")
+        print(f"{HEADER} Seeds: {[seed + i for i in range(batch_size)]}")
+        _log_latent_info("Input latent", latent_image)
+        _log_vram()
+
         latent = latent_image["samples"]
         latent = comfy.sample.fix_empty_latent_channels(
             model, latent, latent_image.get("downscale_ratio_spacial"),
@@ -110,10 +143,13 @@ class KSamplerBatch:
         # Replicate latent for batch
         if batch_size > 1:
             batched_latent = _repeat_batch(latent, batch_size)
+            print(f"{HEADER} Replicated latent: {list(latent.shape)} → {list(batched_latent.shape)}")
         else:
             batched_latent = latent
+            print(f"{HEADER} batch_size=1, no replication needed")
 
         # Generate noise with different seeds per item
+        print(f"{HEADER} Generating noise with independent seeds...")
         noise = _generate_batch_noise(batched_latent, seed, batch_size)
 
         # Replicate noise_mask if present
@@ -122,11 +158,19 @@ class KSamplerBatch:
             mask = latent_image["noise_mask"]
             if mask.shape[0] < batched_latent.shape[0]:
                 noise_mask = _repeat_batch(mask, batch_size)
+                print(f"{HEADER} Noise mask replicated: {list(mask.shape)} → {list(noise_mask.shape)}")
             else:
                 noise_mask = mask
+                print(f"{HEADER} Noise mask: using original {list(mask.shape)}")
+        else:
+            print(f"{HEADER} No noise_mask (not inpainting)")
 
         disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
         callback = latent_preview.prepare_callback(model, steps)
+
+        print(f"{HEADER} Starting sampling (disable_noise=True, we handle noise)...")
+        _log_vram()
+        t_start = time.time()
 
         samples = comfy.sample.sample(
             model, noise, steps, cfg, sampler_name, scheduler,
@@ -138,6 +182,14 @@ class KSamplerBatch:
             disable_pbar=disable_pbar,
             seed=seed,
         )
+
+        t_elapsed = time.time() - t_start
+        print(f"{HEADER} Sampling DONE in {t_elapsed:.2f}s")
+        print(f"{HEADER} Output: shape={list(samples.shape)}, dtype={samples.dtype}")
+        print(f"{HEADER} Time per image: {t_elapsed / batch_size:.2f}s ({batch_size} images)")
+        print(f"{HEADER} vs sequential estimate: {t_elapsed:.2f}s vs ~{t_elapsed / batch_size * batch_size:.0f}s×{batch_size}={t_elapsed / batch_size * batch_size:.0f}s")
+        _log_vram()
+        print(f"{'='*60}\n")
 
         out = latent_image.copy()
         out["samples"] = samples
@@ -215,6 +267,16 @@ class KSamplerBatchAdvanced:
         scheduler, positive, negative, latent_image, start_at_step,
         end_at_step, return_with_leftover_noise, batch_size,
     ):
+        print(f"\n{'='*60}")
+        print(f"{HEADER} KSampler Batch Advanced — START")
+        print(f"{HEADER} Config: batch_size={batch_size}, seed={noise_seed}, steps={steps}, cfg={cfg}")
+        print(f"{HEADER} Sampler: {sampler_name}, Scheduler: {scheduler}")
+        print(f"{HEADER} Steps range: {start_at_step} → {end_at_step}")
+        print(f"{HEADER} add_noise={add_noise}, return_leftover_noise={return_with_leftover_noise}")
+        print(f"{HEADER} Seeds: {[noise_seed + i for i in range(batch_size)]}")
+        _log_latent_info("Input latent", latent_image)
+        _log_vram()
+
         latent = latent_image["samples"]
         latent = comfy.sample.fix_empty_latent_channels(
             model, latent, latent_image.get("downscale_ratio_spacial"),
@@ -223,8 +285,10 @@ class KSamplerBatchAdvanced:
         # Replicate latent for batch
         if batch_size > 1:
             batched_latent = _repeat_batch(latent, batch_size)
+            print(f"{HEADER} Replicated latent: {list(latent.shape)} → {list(batched_latent.shape)}")
         else:
             batched_latent = latent
+            print(f"{HEADER} batch_size=1, no replication needed")
 
         # Generate noise
         force_full_denoise = return_with_leftover_noise != "enable"
@@ -237,7 +301,9 @@ class KSamplerBatchAdvanced:
                 layout=batched_latent.layout,
                 device="cpu",
             )
+            print(f"{HEADER} Noise: DISABLED (zeros), shape={list(noise.shape)}")
         else:
+            print(f"{HEADER} Generating noise with independent seeds...")
             noise = _generate_batch_noise(batched_latent, noise_seed, batch_size)
 
         # Replicate noise_mask if present
@@ -246,11 +312,19 @@ class KSamplerBatchAdvanced:
             mask = latent_image["noise_mask"]
             if mask.shape[0] < batched_latent.shape[0]:
                 noise_mask = _repeat_batch(mask, batch_size)
+                print(f"{HEADER} Noise mask replicated: {list(mask.shape)} → {list(noise_mask.shape)}")
             else:
                 noise_mask = mask
+                print(f"{HEADER} Noise mask: using original {list(mask.shape)}")
+        else:
+            print(f"{HEADER} No noise_mask (not inpainting)")
 
         disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
         callback = latent_preview.prepare_callback(model, steps)
+
+        print(f"{HEADER} Starting sampling (disable_noise=True, force_full_denoise={force_full_denoise})...")
+        _log_vram()
+        t_start = time.time()
 
         samples = comfy.sample.sample(
             model, noise, steps, cfg, sampler_name, scheduler,
@@ -265,6 +339,13 @@ class KSamplerBatchAdvanced:
             disable_pbar=disable_pbar,
             seed=noise_seed,
         )
+
+        t_elapsed = time.time() - t_start
+        print(f"{HEADER} Sampling DONE in {t_elapsed:.2f}s")
+        print(f"{HEADER} Output: shape={list(samples.shape)}, dtype={samples.dtype}")
+        print(f"{HEADER} Time per image: {t_elapsed / batch_size:.2f}s ({batch_size} images)")
+        _log_vram()
+        print(f"{'='*60}\n")
 
         out = latent_image.copy()
         out["samples"] = samples
