@@ -206,10 +206,13 @@ class KSamplerBatch:
         )
 
         t_elapsed = time.time() - t_start
+        per_image = t_elapsed / batch_size
+        seq_estimate = t_elapsed  # first run baseline — no prior data
         print(f"{HEADER} Sampling DONE in {t_elapsed:.2f}s")
         print(f"{HEADER} Output: shape={list(samples.shape)}, dtype={samples.dtype}")
-        print(f"{HEADER} Time per image: {t_elapsed / batch_size:.2f}s ({batch_size} images)")
-        print(f"{HEADER} vs sequential estimate: {t_elapsed:.2f}s vs ~{t_elapsed / batch_size * batch_size:.0f}s×{batch_size}={t_elapsed / batch_size * batch_size:.0f}s")
+        print(f"{HEADER} Time per image: {per_image:.2f}s ({batch_size} images in {t_elapsed:.2f}s)")
+        if batch_size > 1:
+            print(f"{HEADER} Tip: run with batch_size=1 to see your single-image baseline time")
         _log_vram()
         print(f"{'='*60}\n")
 
