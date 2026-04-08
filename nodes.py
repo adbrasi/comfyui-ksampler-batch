@@ -35,7 +35,7 @@ def _generate_batch_noise(latent_image, seed, batch_size, seed_mode="incremental
     if seed_mode == "random":
         rng = torch.Generator(device="cpu")
         rng.manual_seed(seed)
-        item_seeds = [int(torch.randint(0, 2**63, (1,), generator=rng).item()) for _ in range(batch_size)]
+        item_seeds = [int(torch.randint(0, 0xFFFFFFFF, (1,), generator=rng).item()) for _ in range(batch_size)]
         print(f"{HEADER} Seed mode: RANDOM (derived from base seed {seed})")
     elif seed_mode == "fixed":
         item_seeds = [seed] * batch_size
