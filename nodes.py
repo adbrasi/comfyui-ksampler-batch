@@ -16,21 +16,27 @@ def _generate_batch_noise(latent_image, seed, batch_size):
     """Generate noise with truly different seeds for each batch item.
 
     Each item i uses torch.manual_seed(seed + i) so every image is
-    independently reproducible.
+    independently reproducible.  Noise is generated in float32 (matching
+    ComfyUI's prepare_noise behaviour) so that seed N here produces the
+    exact same noise as the standard KSampler with seed N.
     """
+    # Use the actual batch dim of the latent, not the user-requested
+    # batch_size, to handle already-batched inputs correctly.
+    total_batch = latent_image.shape[0]
     shape = [1] + list(latent_image.shape[1:])
+    target_dtype = latent_image.dtype
     noises = []
-    for i in range(batch_size):
-        generator = torch.manual_seed(seed + i)
+    for i in range(total_batch):
+        generator = torch.manual_seed(seed + (i % batch_size))
         noise = torch.randn(
             shape,
-            dtype=latent_image.dtype,
+            dtype=torch.float32,
             layout=latent_image.layout,
             generator=generator,
             device="cpu",
         )
         noises.append(noise)
-    return torch.cat(noises, dim=0)
+    return torch.cat(noises, dim=0).to(dtype=target_dtype)
 
 
 class KSamplerBatch:
@@ -114,7 +120,7 @@ class KSamplerBatch:
         noise_mask = None
         if "noise_mask" in latent_image:
             mask = latent_image["noise_mask"]
-            if batch_size > 1 and mask.shape[0] < batch_size:
+            if mask.shape[0] < batched_latent.shape[0]:
                 noise_mask = _repeat_batch(mask, batch_size)
             else:
                 noise_mask = mask
@@ -126,7 +132,7 @@ class KSamplerBatch:
             model, noise, steps, cfg, sampler_name, scheduler,
             positive, negative, batched_latent,
             denoise=denoise,
-            disable_noise=True,  # We already generated noise
+            disable_noise=True,
             noise_mask=noise_mask,
             callback=callback,
             disable_pbar=disable_pbar,
@@ -135,6 +141,7 @@ class KSamplerBatch:
 
         out = latent_image.copy()
         out["samples"] = samples
+        out.pop("downscale_ratio_spacial", None)
         return (out,)
 
 
@@ -237,7 +244,7 @@ class KSamplerBatchAdvanced:
         noise_mask = None
         if "noise_mask" in latent_image:
             mask = latent_image["noise_mask"]
-            if batch_size > 1 and mask.shape[0] < batch_size:
+            if mask.shape[0] < batched_latent.shape[0]:
                 noise_mask = _repeat_batch(mask, batch_size)
             else:
                 noise_mask = mask
@@ -249,7 +256,7 @@ class KSamplerBatchAdvanced:
             model, noise, steps, cfg, sampler_name, scheduler,
             positive, negative, batched_latent,
             denoise=1.0,
-            disable_noise=True,  # We handle noise ourselves
+            disable_noise=True,
             start_step=start_at_step,
             last_step=end_at_step,
             force_full_denoise=force_full_denoise,
@@ -261,4 +268,5 @@ class KSamplerBatchAdvanced:
 
         out = latent_image.copy()
         out["samples"] = samples
+        out.pop("downscale_ratio_spacial", None)
         return (out,)
