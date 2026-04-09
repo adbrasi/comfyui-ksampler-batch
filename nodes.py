@@ -1,5 +1,6 @@
 import time
 import logging
+from contextlib import contextmanager
 
 import torch
 import comfy.sample
@@ -11,6 +12,27 @@ import latent_preview
 logger = logging.getLogger("KSamplerBatch")
 
 HEADER = "\033[95m[KSampler Batch]\033[0m"
+
+
+@contextmanager
+def _force_full_batch(model):
+    """Temporarily lower the model's memory_usage_factor so ComfyUI's
+    internal sub-batching processes all items in a single forward pass
+    instead of chunking them one-by-one.
+
+    The default factor (2.0) combined with a 1.5x safety margin makes
+    _calc_cond_batch overly conservative.  We reduce it to allow the
+    full batch through, then restore the original value afterwards.
+    """
+    inner_model = model.model
+    original_factor = getattr(inner_model, "memory_usage_factor", 2.0)
+    inner_model.memory_usage_factor = 0.01
+    print(f"{HEADER} Forced full batch: memory_usage_factor {original_factor} → 0.01")
+    try:
+        yield
+    finally:
+        inner_model.memory_usage_factor = original_factor
+        print(f"{HEADER} Restored memory_usage_factor → {original_factor}")
 
 
 def _repeat_batch(tensor, batch_size):
@@ -190,29 +212,29 @@ class KSamplerBatch:
         disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
         callback = latent_preview.prepare_callback(model, steps)
 
-        print(f"{HEADER} Starting sampling (disable_noise=True, we handle noise)...")
+        print(f"{HEADER} Starting sampling...")
         _log_vram()
         t_start = time.time()
 
-        samples = comfy.sample.sample(
-            model, noise, steps, cfg, sampler_name, scheduler,
-            positive, negative, batched_latent,
-            denoise=denoise,
-            disable_noise=True,
-            noise_mask=noise_mask,
-            callback=callback,
-            disable_pbar=disable_pbar,
-            seed=seed,
-        )
+        with _force_full_batch(model):
+            samples = comfy.sample.sample(
+                model, noise, steps, cfg, sampler_name, scheduler,
+                positive, negative, batched_latent,
+                denoise=denoise,
+                disable_noise=True,
+                noise_mask=noise_mask,
+                callback=callback,
+                disable_pbar=disable_pbar,
+                seed=seed,
+            )
 
         t_elapsed = time.time() - t_start
         per_image = t_elapsed / batch_size
-        seq_estimate = t_elapsed  # first run baseline — no prior data
         print(f"{HEADER} Sampling DONE in {t_elapsed:.2f}s")
         print(f"{HEADER} Output: shape={list(samples.shape)}, dtype={samples.dtype}")
         print(f"{HEADER} Time per image: {per_image:.2f}s ({batch_size} images in {t_elapsed:.2f}s)")
         if batch_size > 1:
-            print(f"{HEADER} Tip: run with batch_size=1 to see your single-image baseline time")
+            print(f"{HEADER} Tip: run with batch_size=1 to compare single-image baseline")
         _log_vram()
         print(f"{'='*60}\n")
 
@@ -355,28 +377,29 @@ class KSamplerBatchAdvanced:
         disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
         callback = latent_preview.prepare_callback(model, steps)
 
-        print(f"{HEADER} Starting sampling (disable_noise=True, force_full_denoise={force_full_denoise})...")
+        print(f"{HEADER} Starting sampling (force_full_denoise={force_full_denoise})...")
         _log_vram()
         t_start = time.time()
 
-        samples = comfy.sample.sample(
-            model, noise, steps, cfg, sampler_name, scheduler,
-            positive, negative, batched_latent,
-            denoise=1.0,
-            disable_noise=True,
-            start_step=start_at_step,
-            last_step=end_at_step,
-            force_full_denoise=force_full_denoise,
-            noise_mask=noise_mask,
-            callback=callback,
-            disable_pbar=disable_pbar,
-            seed=noise_seed,
-        )
+        with _force_full_batch(model):
+            samples = comfy.sample.sample(
+                model, noise, steps, cfg, sampler_name, scheduler,
+                positive, negative, batched_latent,
+                denoise=1.0,
+                disable_noise=True,
+                start_step=start_at_step,
+                last_step=end_at_step,
+                force_full_denoise=force_full_denoise,
+                noise_mask=noise_mask,
+                callback=callback,
+                disable_pbar=disable_pbar,
+                seed=noise_seed,
+            )
 
         t_elapsed = time.time() - t_start
         print(f"{HEADER} Sampling DONE in {t_elapsed:.2f}s")
         print(f"{HEADER} Output: shape={list(samples.shape)}, dtype={samples.dtype}")
-        print(f"{HEADER} Time per image: {t_elapsed / batch_size:.2f}s ({batch_size} images)")
+        print(f"{HEADER} Time per image: {t_elapsed / batch_size:.2f}s ({batch_size} images in {t_elapsed:.2f}s)")
         _log_vram()
         print(f"{'='*60}\n")
 
